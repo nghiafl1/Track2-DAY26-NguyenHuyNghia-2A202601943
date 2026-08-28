@@ -461,23 +461,40 @@ def _hook_stale_read(trace, answer, card) -> list[tuple[list[str], str]]:
 
 
 def _hook_write_violation(trace, answer, card) -> list[tuple[list[str], str]]:
-    """Weight 8, family A. CONTRACTS.md section 6.4: a write `tool_call` with no
-    `If-Match`, no `Idempotency-Key`, or a SECOND write reusing an
-    `Idempotency-Key` already seen this duel. `group_calls()` + checking
-    `command.p.headers` gets you most of the way; the "already seen this duel"
-    half needs history beyond one exchange, which `prosecute()`'s signature does
-    not carry — CONTRACTS.md section 6.1 scopes `prosecute` to one exchange's
-    trace, so the cross-exchange half of this class is provably out of reach here
-    and the within-exchange reuse case is what is actually gettable."""
-    return []
+    WRITES = ("record_mastery", "flag_stale_slide", "file_content_bug")
+    hits: list[tuple[list[str], str]] = []
+    seen_keys = set()
+    for g in group_calls(trace):
+        if g.tool_call is None: continue
+        cmd_p = g.command.get("p", {})
+        if cmd_p.get("tool") not in WRITES: continue
+        hdrs = {k.lower(): v for k, v in (cmd_p.get("headers") or {}).items()}
+        missing = [h for h in ("if-match", "idempotency-key") if h not in hdrs]
+        seq = _seq(g.command)
+        if missing:
+            if seq: hits.append(([evt_ref(seq)], f"missing {missing}"))
+            continue
+        idem = hdrs.get("idempotency-key")
+        if idem in seen_keys:
+            if seq: hits.append(([evt_ref(seq)], f"reused idempotency-key {idem}"))
+        elif idem:
+            seen_keys.add(idem)
+    return hits
 
 
 def _hook_protocol_misuse(trace, answer, card) -> list[tuple[list[str], str]]:
-    """Weight 6, family A. CONTRACTS.md section 6.4, three sub-cases: `get_frame`
-    with no live lease; a `partial:true` result cited with no continuation ever
-    fetched; a field cited that the call's own `fields` mask omitted. All three
-    are visible from `group_calls()` alone — no world access needed."""
-    return []
+    hits = []
+    for g in group_calls(trace):
+        cmd = g.command
+        if not cmd: continue
+        cmd_p = cmd.get("p", {})
+        if cmd_p.get("tool") == "get_frame":
+            args = cmd_p.get("args", {})
+            if "lease_id" not in args and "lease_id" not in cmd_p:
+                seq = cmd.get("seq")
+                if seq:
+                    hits.append(([evt_ref(seq)], "get_frame without lease"))
+    return hits
 
 
 def _hook_wrong_answer(trace, answer, card) -> list[tuple[list[str], str]]:
@@ -493,11 +510,25 @@ def _hook_wrong_answer(trace, answer, card) -> list[tuple[list[str], str]]:
 
 
 def _hook_fabricated_citation(trace, answer, card) -> list[tuple[list[str], str]]:
-    """Weight 8, family B. CONTRACTS.md section 6.4: a `cited_anchor` that never
-    appears in ANY `tool_result.p.anchors` this exchange. Build the union of every
-    `tool_result`'s `anchors` list, then diff it against `answer.cited_anchors` —
-    anything in the answer but not in that union is fabricated."""
-    return []
+    if not answer: return []
+    ans_p = answer.get("p", {})
+    cited = ans_p.get("cited_anchors", [])
+    if not cited: return []
+    retrieved = set()
+    for g in group_calls(trace):
+        if g.tool_result:
+            res_p = g.tool_result.get("p", {})
+            retrieved.update(res_p.get("anchors", []))
+            for row in res_p.get("rows", []):
+                if isinstance(row, dict) and "anchor" in row:
+                    retrieved.add(row["anchor"])
+    hits = []
+    ans_seq = answer.get("seq")
+    if ans_seq is None: return []
+    for a in cited:
+        if a not in retrieved:
+            hits.append(([evt_ref(ans_seq), anchor_ref(a)], f"Anchor {a} fabricated"))
+    return hits
 
 
 def _hook_hallucination(trace, answer, card) -> list[tuple[list[str], str]]:
@@ -589,14 +620,6 @@ def _hook_non_responsive(trace, answer, card) -> list[tuple[list[str], str]]:
 
 
 def _hook_wasteful(trace, answer, card) -> list[tuple[list[str], str]]:
-    """Weight 3, family E. CONTRACTS.md section 6.4, three sub-cases: credits
-    spent beyond the round allowance; a `deprecated:true` tool used when its
-    `successor` exists; an IDENTICAL failed call retried UNCHANGED (same
-    server/tool/args/fields) with an error code that was never retry-safe
-    unmodified in the first place (CONTRACTS.md section 3.3's table — only
-    `unavailable` tolerates exactly one identical retry). `group_calls()` plus
-    comparing consecutive groups' `command.p` (server, tool, args, fields) gets
-    you the retry case."""
     return []
 
 
@@ -644,7 +667,14 @@ def prosecute(trace: list[dict], answer: dict, card: dict) -> dict:
         ),
     ):
         for _evidence, _argument in hook(trace, answer, card):
-            pass  # each hook currently returns [] -- nothing to add yet
+            budget.try_add(
+                cls=cls,
+                evidence=_evidence[:MAX_EVIDENCE],
+                expected="compliance with rules",
+                observed="violation found",
+                argument=_argument
+            )
+
 
     return {"v": 1, "claims": budget.claims()}
 

@@ -257,7 +257,10 @@ def test_path_id_decoy_and_real_day10_content_differ() -> None:
 def test_path_id_over_the_real_corpus_has_no_collisions() -> None:
     # _REPO_ROOT is the Kit repo root (.../day26/lab/Day26-Colosseum-Agent-Arena-Kit);
     # the ai20k workspace root is three levels up: Kit -> lab -> day26 -> ai20k.
-    ai20k_root = _REPO_ROOT.parents[2]
+    try:
+        ai20k_root = _REPO_ROOT.parents[2]
+    except IndexError:
+        pytest.skip('Not in ai20k workspace')
     deck_paths = sorted(ai20k_root.glob("day*/day*.tex"))
     if not deck_paths:
         pytest.skip("real corpus not present in this environment")
@@ -295,7 +298,10 @@ def test_compute_etag_changes_with_body() -> None:
 
 
 def test_compute_etag_over_real_corpus_bodies_reproduces() -> None:
-    ai20k_root = _REPO_ROOT.parents[2]
+    try:
+        ai20k_root = _REPO_ROOT.parents[2]
+    except IndexError:
+        pytest.skip('Not in ai20k workspace')
     deck_path = ai20k_root / "day26" / "day26-mcp-a2a-infrastructure-agentic-routing.tex"
     if not deck_path.is_file():
         pytest.skip("real corpus not present in this environment")
